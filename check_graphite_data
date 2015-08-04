@@ -19,6 +19,8 @@ def usage():
     print '\t-u <url> --url=<url>\t\tGraphite graph URL'
     print '\t-r\t\t\t\tReverse - Alert when the value is UNDER warn/crit instead of OVER'
     print '\t-s <secs> --seconds=<secs>\tAverage over the last N seconds of data'
+    print '\t-p <prct> --percentile=<prct>\tDon\'t compute mean but percentile'
+    print '\t\t\t\t\t(specified by a value between 0 and 1)'
     print '\t--d1 <url> --d2 <url>\t\tDiff the latest values between two graphs'
     print '\t-W --holt-winters\t\tPerform a Holt-Winters check'
     print '\t-U --critupper\t\t\tUpper Holt-Winters band breach causes a crit,'
@@ -48,7 +50,19 @@ def pull_graphite_data(url):
 	print "Error: "+ str(e) +" - " + url
         sys.exit(STATE_UNKNOWN)
 
-def eval_graphite_data(data, seconds):
+
+def meanFunc(data_set):
+    return float(sum(data_set)) / len(data_set)
+
+
+def percentileFunc(percentile):
+    def _percentileClosure(data_set):
+        position = int(round(len(data_set)*percentile))
+        return sorted(data_set)[position]
+    return _percentileClosure
+
+
+def eval_graphite_data(data, seconds, aggregateFunction):
     """Get the most recent correct value from the data"""
 
     sample_period = int(data.split('|')[0].split(',')[-1])
@@ -73,38 +87,38 @@ def eval_graphite_data(data, seconds):
         data_set = [ float(x) for x in all_data_points[-data_points:]
                      if not x.startswith("None") ]
         if data_set:
-            data_value = float( sum(data_set) / len(data_set) )
+            data_value = aggregateFunction(data_set)
         else:
             data_value = 0.0
     return data_value
 
 
-def get_hw_value(url, seconds=0):
+def get_hw_value(url, seconds=0, aggregateFunction=meanFunc):
     """Get the Holt-Winters value from a Graphite graph"""
 
     data = pull_graphite_data(url)
     for line in data.split():
         if line.startswith('holtWintersConfidenceUpper'):
-            graphite_upper = eval_graphite_data(line, seconds)
+            graphite_upper = eval_graphite_data(line, seconds, aggregateFunction)
         elif line.startswith('holtWintersConfidenceLower'):
-            graphite_lower = eval_graphite_data(line, seconds)
+            graphite_lower = eval_graphite_data(line, seconds, aggregateFunction)
         else:
-            graphite_data = eval_graphite_data(line, seconds)
+            graphite_data = eval_graphite_data(line, seconds, aggregateFunction)
 
     return graphite_data, graphite_lower, graphite_upper
 
 
-def get_value(url, seconds=0):
+def get_value(url, seconds=0, aggregateFunction=meanFunc):
     """Get the value from a Graphite graph"""
 
     data = pull_graphite_data(url)
-    data_value = eval_graphite_data(data, seconds)
+    data_value = eval_graphite_data(data, seconds, aggregateFunction)
     return data_value
 
 
 def main(argv):
     try:
-        opts, args = getopt.getopt(argv, 'hWULru:c:w:s:',
+        opts, args = getopt.getopt(argv, 'hWULru:c:w:s:p:',
                                     ['help', 'holt-winters', 'critupper',
                                      'critlower', 'url=', 'crit=', 'warn=',
                                      'seconds=', 'd1=', 'd2='
@@ -118,6 +132,7 @@ def main(argv):
     warn = None
     crit = None
     seconds = 0
+    percentile = None
     diff1 = None
     diff2 = None
     reverse = False
@@ -137,6 +152,9 @@ def main(argv):
             crit = float(arg)
         elif opt in ('-s', '--seconds'):
             seconds = int(arg)
+        elif opt in ('-p', '--percentile'):
+            percentile = float(arg)
+            assert percentile >= 0 and percentile <= 1
         elif opt in ('-r'):
             reverse = True
         elif opt in ('--d1'):
@@ -178,7 +196,10 @@ def main(argv):
         graphite_data2 = get_value(diff2, seconds)
         graphite_data = abs(graphite_data1 - graphite_data2)
     else:
-        graphite_data = get_value(url, seconds)
+        if percentile:
+            graphite_data = get_value(url, seconds, percentileFunc(percentile))
+        else:
+            graphite_data = get_value(url, seconds, meanFunc)
     graphite_data *= scale
 
     print 'Current value: %s, warn threshold: %s, crit threshold: %s' % \
